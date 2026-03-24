@@ -1,7 +1,7 @@
 # RTAR (Real-Time Audio Receiver)
 
 RTAR is a local network (LAN) application built with Tauri and Rust designed to receive ultra-low latency audio from a PC and stream it seamlessly to an Android device.
-
+[Server App RTABC](https://github.com/ElChochua/RTABC)
 ## Prerequisites
 
 - [Rust and Cargo](https://rustup.rs/) installed.
