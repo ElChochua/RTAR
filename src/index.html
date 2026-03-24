@@ -13,20 +13,32 @@
   <main class="container">
     <h1>LocalAudioLink</h1>
 
-    <!-- Pantalla de Discovery -->
+    <!-- Discovery Screen -->
     <div id="discovery-status">
-      <h2>Buscando Servidor...</h2>
-      <p>Esperando paquete UDP en el puerto 5000...</p>
+      <h2>Searching for Server...</h2>
+      <p>Waiting for UDP packet on port 5000...</p>
     </div>
 
     <!-- Panel de Servidor Encontrado -->
     <div id="server-panel" style="display: none; margin-top: 2rem;">
       <h2>¡Servidor Encontrado!</h2>
       <p id="server-ip-display" style="font-weight: bold; color: #00ff00;">IP: --</p>
-      <button id="connect-btn" style="margin-top: 1rem;">Conectar y Escuchar Audio</button>
+      <button id="connect-btn" style="margin-top: 1rem;">Connect and Listen to Audio</button>
       <br>
-      <button id="reconnect-btn" style="margin-top: 1rem; background-color: #ff4444; color: white;">Desconectar y Buscar
-        Otro Servidor</button>
+      <button id="reconnect-btn" style="margin-top: 1rem; background-color: #ff4444; color: white;">Disconnect and
+        Search Another Server</button>
+
+      <!-- Controles multimedia AVRCP -->
+      <div id="media-controls" style="display: none; margin-top: 2rem; border-top: 1px solid #333; padding-top: 1rem;">
+        <h3>Remote Controls</h3>
+        <p style="font-size: 0.8rem; color: #888;">If you use headphones, the physical taps/buttons will also generate
+          these actions.</p>
+        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 10px;">
+          <button id="btn-prev">⏮ Previous</button>
+          <button id="btn-playpause">⏯ Play/Pause</button>
+          <button id="btn-next">⏭ Next</button>
+        </div>
+      </div>
     </div>
   </main>
 </body>
