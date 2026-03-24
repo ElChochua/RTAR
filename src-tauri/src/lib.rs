@@ -56,27 +56,27 @@ fn restart_audio() -> Result<String, String> {
     Ok("Audio service stopped successfully.".into())
 }
 
-/// Envía comandos multimedia (Play, Pause, Next) hacia el servidor (PC).
+/// Sends media commands (Play, Pause, Next) to the server (PC).
 /// 
-/// **Arquitectura**: Usamos un UdpSocket síncrono estándar de la stdlib porque esto 
-/// es un disparo "fire and forget" muy rápido. No vale la pena bloquear tareas asíncronas
-/// para enviar unos bytes que representan un comando de control y cerrarse.
+/// **Architecture**: We use a standard synchronous UdpSocket from the stdlib because this 
+/// is a very fast "fire and forget" shot. It's not worth blocking asynchronous tasks
+/// to send a few bytes representing a control command and close.
 #[tauri::command]
 fn send_media_command(ip: &str, command: &str) -> Result<String, String> {
-    println!("[Comando Multimedia] Enviando '{}' hacia IP: {}", command, ip);
+    println!("[Media Command] Sending '{}' to IP: {}", command, ip);
     
-    // Obtenemos un socket disponible aleatorio en el OS
+    // Get a random available socket in the OS
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("Fallo al abrir socket: {}", e))?;
+        .map_err(|e| format!("Failed to open socket: {}", e))?;
         
-    // Asumimos que el servidor PC va a escuchar los comandos en el puerto 8889
-    // (o el puerto que prefieras asignar en el agente del servidor)
+    // Assume the PC server will listen for commands on port 8889
+    // (or the port you prefer to assign in the server agent)
     let target = format!("{}:8889", ip);
     
     socket.send_to(command.as_bytes(), target)
-        .map_err(|e| format!("Fallo al enviar comando UDP: {}", e))?;
+        .map_err(|e| format!("Failed to send UDP command: {}", e))?;
         
-    Ok(format!("Comando {} emitido con éxito.", command))
+    Ok(format!("Command {} sent successfully.", command))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
