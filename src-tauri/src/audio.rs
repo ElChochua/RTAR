@@ -1,6 +1,9 @@
+use crate::audio_codec::{self, AudioDecoder};
+use crate::jitter::{AudioJitterBuffer, BufferedAudioPacket, PlayoutItem};
+use crate::protocol::{self, Codec, MediaKind, FLAG_DISCONTINUITY};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleRate, Stream, StreamConfig};
-use ringbuf::{Consumer, Producer, HeapRb};
+use ringbuf::{HeapRb, Producer};
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -26,29 +29,29 @@ pub fn setup_audio_stream() -> Result<Stream, Box<dyn Error>> {
 
     // We force our audio configuration chosen in RTABC
     let config = StreamConfig {
-        channels: 2,                            // Stereo
-        sample_rate: SampleRate(48000),         // 48kHz
-        
+        channels: 2,                    // Stereo
+        sample_rate: SampleRate(48000), // 48kHz
+
         // Support for Wireless (Bluetooth)! Instead of demanding 256 fixed samples
         // to the sound card (which crashes BT headphones in silence),
         // we let the operating system and the A2DP driver choose their ideal buffer.
-        buffer_size: cpal::BufferSize::Default, 
+        buffer_size: cpal::BufferSize::Default,
     };
 
     // 4. We build the concurrent queue (Ring Buffer) to pass the float32 from the network to the audio
     // Extreme Noise Resistance Adjustment (Bluetooth):
     // The Wi-Fi and BT chips share the same physical antenna in phones and the 2.4Ghz frequency.
     // Turning on BT can cause Wi-Fi to drop packets.
-    let ring_buffer = HeapRb::<f32>::new(32768);
+    let ring_buffer = HeapRb::<f32>::new(audio_codec::FRAME_SAMPLES * 5);
     let (producer, mut consumer) = ring_buffer.split();
 
     // We create the stream (it doesn't start playing yet, it's just built)
     println!("Configuring Output Stream: 2 Channels, 48000Hz, f32 (Low Latency)");
 
-    // Internal state for Soft-Start "Pre-Buffering". 
+    // Internal state for Soft-Start "Pre-Buffering".
     // Will start as 'false' mutating to 'true' once the network gathers enough data.
     let mut is_playing = false;
-    let prebuffer_threshold = 480; // Ultra-Low Latency: Same as 5ms of audio (48,000Hz Stereo = 96k/sec)
+    let prebuffer_threshold = audio_codec::FRAME_SAMPLES;
 
     let err_fn = |err| eprintln!("An error occurred in the CPAL Audio thread: {}", err);
 
@@ -56,12 +59,14 @@ pub fn setup_audio_stream() -> Result<Stream, Box<dyn Error>> {
         &config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let available = consumer.len();
-            
+
             // Pre-Buffering Logic. We don't play anything if the queue is almost dead
             if !is_playing {
                 if available < prebuffer_threshold {
                     // Keep injecting mathematical silence without Tsss
-                    for sample in data.iter_mut() { *sample = 0.0; }
+                    for sample in data.iter_mut() {
+                        *sample = 0.0;
+                    }
                     return; // Exit immediately from the callback
                 }
                 // The threshold has been crossed! Release the dam
@@ -69,16 +74,18 @@ pub fn setup_audio_stream() -> Result<Stream, Box<dyn Error>> {
             } else if available == 0 {
                 // Buffer empty (Wi-Fi died temporarily). Freeze the playback.
                 is_playing = false;
-                for sample in data.iter_mut() { *sample = 0.0; }
+                for sample in data.iter_mut() {
+                    *sample = 0.0;
+                }
                 return;
             }
 
             // Regular extraction if pre-buffer is exceeded
             let safe_read_count = std::cmp::min(available, data.len());
             let even_read_count = safe_read_count - (safe_read_count % 2); // Truncate to even
-            
+
             let read_count = consumer.pop_slice(&mut data[..even_read_count]);
-            
+
             // If we are missing data to read (slight underflow on the local side)
             // Fill the rest with silence to avoid infinite noise (RAM Ghosting)
             for sample in data[read_count..].iter_mut() {
@@ -103,9 +110,9 @@ pub fn setup_audio_stream() -> Result<Stream, Box<dyn Error>> {
     Ok(stream)
 }
 
-/// Listens passively on UDP port 5001 for all audio sent by the PC.
+/// Receives versioned Opus packets, reorders them and plays on a fixed 10 ms clock.
 async fn receive_audio_udp(
-    mut producer: Producer<f32, Arc<HeapRb<f32>>>
+    mut producer: Producer<f32, Arc<HeapRb<f32>>>,
 ) -> Result<(), Box<dyn Error>> {
     let socket2 = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -123,7 +130,7 @@ async fn receive_audio_udp(
     let std_socket: std::net::UdpSocket = socket2.into();
     let socket = UdpSocket::from_std(std_socket)?;
 
-    // Since the Discovery Ping now travels through a random port, the Android firewall 
+    // Since the Discovery Ping now travels through a random port, the Android firewall
     // will close port 5000 blocking the audio input from the PC server.
     // To avoid this, we fire a "salvo shot" from the newly opened port 5000
     // directly to port 8888 of the PC. This pierces the Gateway NAT.
@@ -136,42 +143,68 @@ async fn receive_audio_udp(
     // Return the socket to its normal state
     socket.set_broadcast(false)?;
 
-    // Helper: i16 to f32.
-    // We receive raw PCM directly from WASAPI (Windows Audio)
-    println!("Audio Antenna ready. Listening for 16-bit Linear PCM (Uncompressed) packets on UDP port 5000...");
+    println!("Audio receiver ready. Listening for Opus packets on UDP port 5000...");
 
-    let mut buf = [0; 2048]; // UDP Buffer (A stereo 16-bit packet will be typically larger, but 2048 is safe for UDP fragments)
-    
+    let mut buf = [0; protocol::MAX_DATAGRAM_LEN];
+    let mut jitter = AudioJitterBuffer::new();
+    let mut decoder = AudioDecoder::new();
+    let mut active_stream_id = None;
+    let mut playout = tokio::time::interval(std::time::Duration::from_millis(
+        audio_codec::FRAME_DURATION_MS as u64,
+    ));
+    playout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
-        let (size, _) = socket.recv_from(&mut buf).await?;
-        let packet_data = &buf[..size];
+        tokio::select! {
+            received = socket.recv_from(&mut buf) => {
+                let (size, _) = received?;
+                let (header, packet_data) = match protocol::decode_datagram(&buf[..size]) {
+                    Ok(packet) => packet,
+                    Err(_) => continue,
+                };
+                if header.media_kind != MediaKind::Audio || header.codec != Codec::Opus {
+                    continue;
+                }
 
-        // TODO: In the future, if the PC groups the network into larger frames of 2048 bytes, 
-        // this buffer will have to be enlarged.
-        
-        let safe_len = packet_data.len() - (packet_data.len() % 2); // Prevent trailing odd bytes
-        let safe_data = &packet_data[..safe_len];
+                let stream_changed = active_stream_id != Some(header.stream_id);
+                if stream_changed || header.flags & FLAG_DISCONTINUITY != 0 {
+                    jitter.reset();
+                    decoder.reset();
+                    active_stream_id = Some(header.stream_id);
+                }
 
-        // Anti-Buffer-Bloat (Keep the latency logic)
-        if producer.len() > 9600 {
-            // Drop packets implicitly to sync real-time
-        }
+                jitter.insert(BufferedAudioPacket {
+                    sequence: header.sequence,
+                    timestamp_us: header.timestamp_us,
+                    flags: header.flags,
+                    payload: packet_data.to_vec(),
+                });
+            }
 
-        if producer.len() < 19200 { 
-            // Architectural Decision: Windows transmits memory in Little Endian format natively.
-            // We read `chunks_exact(2)` from the packet because 1 sample of i16 = 2 bytes.
-            for chunk in safe_data.chunks_exact(2) {
-                // Deserialization: Cast two network bytes into a single signed 16-bit integer
-                let sample_i16 = i16::from_le_bytes([chunk[0], chunk[1]]);
-                
-                // Linear Scaling: Map from integer domains (-32768 to 32767) into floating space (-1.0 to 1.0)
-                let sample_f32 = sample_i16 as f32 / 32768.0;
-                
-                // Audio Engineering: "Headroom" limit. Multiply by 0.9 to prevent pure 1.0 clipping 
-                // on the physical speaker DAC if the signal is exactly at its physical maximum.
-                let final_sample = sample_f32 * 0.9;
-                
-                let _ = producer.push(final_sample);
+            _ = playout.tick() => {
+                let decoded = match jitter.pop() {
+                    PlayoutItem::Waiting => None,
+                    PlayoutItem::Packet(packet) => decoder.decode(&packet.payload).ok(),
+                    PlayoutItem::Missing { next_payload, .. } => {
+                        match next_payload {
+                            Some(packet) => decoder.recover_fec(&packet).ok(),
+                            None => Some(decoder.conceal()),
+                        }
+                        .or_else(|| Some(decoder.conceal()))
+                    }
+                    PlayoutItem::Reset => {
+                        decoder.reset();
+                        None
+                    }
+                };
+
+                if let Some(pcm) = decoded {
+                    if pcm.len() == audio_codec::FRAME_SAMPLES
+                        && producer.free_len() >= pcm.len()
+                    {
+                        let _ = producer.push_slice(&pcm);
+                    }
+                }
             }
         }
     }

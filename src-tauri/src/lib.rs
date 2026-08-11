@@ -1,5 +1,8 @@
-mod network;
 mod audio;
+mod audio_codec;
+mod jitter;
+mod network;
+mod protocol;
 use lazy_static::lazy_static;
 use std::sync::Mutex;
 
@@ -17,14 +20,14 @@ lazy_static! {
 #[tauri::command]
 fn start_audio(ip: &str) -> Result<String, String> {
     println!("Frontend requested to connect to audio IP: {}", ip);
-    
+
     // We try to initialize CPAL and save it
     match audio::setup_audio_stream() {
         Ok(stream) => {
             // We pack it in the Heap (Box), convert it to Raw Pointer and save it in the global
             let stream_ptr = Box::into_raw(Box::new(stream));
             let mut global_stream = GLOBAL_AUDIO_STREAM.lock().unwrap();
-            
+
             // If for some reason there was a live one, we kill it (to avoid memory leaks)
             if let Some(old_handle) = global_stream.take() {
                 unsafe {
@@ -34,8 +37,8 @@ fn start_audio(ip: &str) -> Result<String, String> {
 
             *global_stream = Some(StreamHandle(stream_ptr));
             Ok(format!("Local audio stream initialized for {}", ip))
-        },
-        Err(e) => Err(format!("Failed to initialize CPAL: {}", e))
+        }
+        Err(e) => Err(format!("Failed to initialize CPAL: {}", e)),
     }
 }
 
@@ -44,7 +47,7 @@ fn start_audio(ip: &str) -> Result<String, String> {
 #[tauri::command]
 fn restart_audio() -> Result<String, String> {
     println!("Frontend requested to restart the Audio subsystem (Hot-Swap)...");
-    
+
     let mut global_stream = GLOBAL_AUDIO_STREAM.lock().unwrap();
     if let Some(handle) = global_stream.take() {
         unsafe {
@@ -57,25 +60,26 @@ fn restart_audio() -> Result<String, String> {
 }
 
 /// Sends media commands (Play, Pause, Next) to the server (PC).
-/// 
-/// **Architecture**: We use a standard synchronous UdpSocket from the stdlib because this 
+///
+/// **Architecture**: We use a standard synchronous UdpSocket from the stdlib because this
 /// is a very fast "fire and forget" shot. It's not worth blocking asynchronous tasks
 /// to send a few bytes representing a control command and close.
 #[tauri::command]
 fn send_media_command(ip: &str, command: &str) -> Result<String, String> {
     println!("[Media Command] Sending '{}' to IP: {}", command, ip);
-    
+
     // Get a random available socket in the OS
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| format!("Failed to open socket: {}", e))?;
-        
+
     // Assume the PC server will listen for commands on port 8889
     // (or the port you prefer to assign in the server agent)
     let target = format!("{}:8889", ip);
-    
-    socket.send_to(command.as_bytes(), target)
+
+    socket
+        .send_to(command.as_bytes(), target)
         .map_err(|e| format!("Failed to send UDP command: {}", e))?;
-        
+
     Ok(format!("Command {} sent successfully.", command))
 }
 

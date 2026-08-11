@@ -1,4 +1,6 @@
 RTAR is a local network (LAN) application built with Tauri and Rust designed to receive ultra-low latency audio from a PC and stream it seamlessly to an Android device.
+
+> Active refactor: RTAR receives 48 kHz stereo Opus frames inside LocalAudioLink protocol v1, with bounded reordering and packet-loss concealment. Background playback and Android-to-PC HEVC streaming remain staged work. See the `docs` directory in the RTABC repository and [ANDROID_ARCHITECTURE.md](docs/ANDROID_ARCHITECTURE.md).
 [Server App RTABC](https://github.com/ElChochua/RTABC)
 ## Prerequisites
 
